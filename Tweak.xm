@@ -205,11 +205,15 @@ static void* (*il2cpp_thread_attach)(void*);
 static void* (*il2cpp_domain_get_assemblies)(void*, size_t*);
 static void* (*il2cpp_assembly_get_image)(void*);
 static const char* (*il2cpp_image_get_name)(void*);
+static const char* (*il2cpp_class_get_name)(void*);
 static void* (*il2cpp_class_from_name)(void*, const char*, const char*);
 static void* (*il2cpp_class_get_type)(void*);
 static void* (*il2cpp_type_get_object)(void*);
 static void* (*il2cpp_class_get_method_from_name)(void*, const char*, int);
 static void* (*il2cpp_runtime_invoke)(void*, void*, void*, void*);
+/* ★ 按类名全域兜底要用（autohead.js 的 fc() 同款）：遍历 image 里所有类比对名字 */
+static size_t  (*il2cpp_image_get_class_count)(void*);
+static void*   (*il2cpp_image_get_class)(void*, size_t);
 static BOOL il2cppBound = NO;
 
 static BOOL bindIl2cpp(void) {
@@ -219,11 +223,14 @@ static BOOL bindIl2cpp(void) {
     *(void **)&il2cpp_domain_get_assemblies = dlsym(RTLD_DEFAULT, "il2cpp_domain_get_assemblies");
     *(void **)&il2cpp_assembly_get_image    = dlsym(RTLD_DEFAULT, "il2cpp_assembly_get_image");
     *(void **)&il2cpp_image_get_name        = dlsym(RTLD_DEFAULT, "il2cpp_image_get_name");
+    *(void **)&il2cpp_class_get_name        = dlsym(RTLD_DEFAULT, "il2cpp_class_get_name");
     *(void **)&il2cpp_class_from_name       = dlsym(RTLD_DEFAULT, "il2cpp_class_from_name");
     *(void **)&il2cpp_class_get_type        = dlsym(RTLD_DEFAULT, "il2cpp_class_get_type");
     *(void **)&il2cpp_type_get_object       = dlsym(RTLD_DEFAULT, "il2cpp_type_get_object");
     *(void **)&il2cpp_class_get_method_from_name = dlsym(RTLD_DEFAULT, "il2cpp_class_get_method_from_name");
     *(void **)&il2cpp_runtime_invoke        = dlsym(RTLD_DEFAULT, "il2cpp_runtime_invoke");
+    *(void **)&il2cpp_image_get_class_count = dlsym(RTLD_DEFAULT, "il2cpp_image_get_class_count");
+    *(void **)&il2cpp_image_get_class       = dlsym(RTLD_DEFAULT, "il2cpp_image_get_class");
     il2cppBound = (il2cpp_domain_get && il2cpp_thread_attach && il2cpp_domain_get_assemblies &&
                    il2cpp_assembly_get_image && il2cpp_image_get_name && il2cpp_class_from_name &&
                    il2cpp_class_get_type && il2cpp_type_get_object &&
@@ -240,17 +247,50 @@ static uintptr_t UFBase(void) {
 
 /* ================= 类 / 方法绑定 ================= */
 static void *ASMS = NULL;                    /* Assembly-CSharp image */
+static void *K_coreImg = NULL;               /* UnityEngine.CoreModule image */
 static void *K_object = NULL, *K_person = NULL, *K_shooter = NULL;
 static void *K_halloween = NULL, *K_zombie = NULL, *K_hallPerson = NULL;
 static void *K_spawnerH = NULL, *K_spawnerX = NULL, *K_spawnerG = NULL, *K_spawnerG5 = NULL;
 static void *mFOOAll = NULL, *mKill1 = NULL, *mHallInst = NULL, *mHallScore = NULL, *mHallTD = NULL;
 static void *tPerson = NULL, *tSpawnerH = NULL, *tSpawnerX = NULL, *tSpawnerG = NULL, *tSpawnerG5 = NULL;
 
+/* ★ 所有程序集都存下来（不只 Assembly-CSharp）：类的命名空间可能不在 Assembly-CSharp */
+static void *gImgs[96];
+static int gImgsN = 0;
+static void clsFromAdd(void *img) {
+    @try {
+        const char *nm = il2cpp_image_get_name(img);
+        if (!nm) return;
+        if (strstr(nm, "UnityEngine.CoreModule")) K_coreImg = img;
+    } @catch (NSException *e) {}
+    if (gImgsN < 96) gImgs[gImgsN++] = img;
+}
+/* ★ 强版查找 = autohead.js 的 fc()：
+ *   ① 所有 image 里按 (命名空间, 类名) 找
+ *   ② 找不到就在所有 image 里**逐个类比名字**兜底（命名空间经常对不上） */
 static void *clsFrom(const char *ns, const char *nm) {
-    if (!ASMS) return NULL;
-    void *c = il2cpp_class_from_name(ASMS, ns, nm);
-    if (c) return c;
-    return il2cpp_class_from_name(ASMS, "", nm);      /* 命名空间兜底 */
+    for (int i = 0; i < gImgsN; i++) {
+        void *c = il2cpp_class_from_name(gImgs[i], ns, nm);
+        if (c) return c;
+    }
+    for (int i = 0; i < gImgsN; i++) {
+        void *c = il2cpp_class_from_name(gImgs[i], "", nm);
+        if (c) return c;
+    }
+    if (il2cpp_image_get_class_count && il2cpp_image_get_class) {
+        for (int i = 0; i < gImgsN; i++) {
+            size_t cnt = 0;
+            @try { cnt = il2cpp_image_get_class_count(gImgs[i]); } @catch (NSException *e) { continue; }
+            for (size_t j = 0; j < cnt; j++) {
+                void *cls = NULL;
+                @try { cls = il2cpp_image_get_class(gImgs[i], j); } @catch (NSException *e) { continue; }
+                if (!cls) continue;
+                const char *cn = il2cpp_class_get_name(cls);
+                if (cn && strcmp(cn, nm) == 0) return cls;
+            }
+        }
+    }
+    return NULL;
 }
 static void *meth(void *cls, const char *nm, int n) {
     return cls ? il2cpp_class_get_method_from_name(cls, nm, n) : NULL;
@@ -268,18 +308,19 @@ static BOOL setupAll(void) {
     size_t n = 0;
     void **arr = (void **)il2cpp_domain_get_assemblies(d, &n);
     if (!arr || !n) return NO;
-    void *core = NULL;
+    K_coreImg = NULL;
     ASMS = NULL;
+    gImgsN = 0;
     for (size_t i = 0; i < n; i++) {
         void *img = il2cpp_assembly_get_image(arr[i]);
         if (!img) continue;
+        clsFromAdd(img);                                   /* ★ 全部存下来，供 clsFrom 兜底遍历 */
         const char *nm = il2cpp_image_get_name(img);
         if (!nm) continue;
-        if (strstr(nm, "UnityEngine.CoreModule")) core = img;
         if (strstr(nm, "Assembly-CSharp")) ASMS = img;
     }
-    if (!core || !ASMS) return NO;
-    K_object      = il2cpp_class_from_name(core, "UnityEngine", "Object");
+    if (!K_coreImg || !ASMS) return NO;
+    K_object      = il2cpp_class_from_name(K_coreImg, "UnityEngine", "Object");
     K_person      = clsFrom("Person", "Person");
     K_shooter     = clsFrom("Player", "CharacterShooter");
     K_halloween   = clsFrom("Game.HalloweenLiveEvent.Sniper3D", "HalloweenLiveEventLevelController");
@@ -532,7 +573,7 @@ static void spawnTick(void) {
         int total = cfg.spawnTotal > 0 ? cfg.spawnTotal : 500;
         void *clsList[4] = { K_spawnerH, K_spawnerX, K_spawnerG, K_spawnerG5 };
         void *typeList[4] = { tSpawnerH, tSpawnerX, tSpawnerG, tSpawnerG5 };
-        int hit = 0;
+        int hit = 0, foundN = 0, runningN = 0;
         for (int k = 0; k < 4; k++) {
             if (!clsList[k] || !typeList[k]) continue;
             void *r = inv(mFOOAll, NULL, (void *[]){ typeList[k] }, 1);
@@ -541,10 +582,12 @@ static void spawnTick(void) {
             for (int i = 0; i < n && i < 30; i++) {
                 void *s = *(void **)((char *)r + 0x20 + 8 * i);
                 if (!s) continue;
+                foundN++;
                 SpSpec sp;
                 if (!specOf(*(void **)s, &sp)) continue;      /* 按实例的实际类取偏移 */
                 @try {
                     if (!*(uint8_t *)((char *)s + sp.run)) continue;   /* 只在波次进行中改 */
+                    runningN++;
                     *(float *)((char *)s + SP_TOTAL_MIN) = (float)total;
                     *(float *)((char *)s + SP_TOTAL_MAX) = (float)total;
                     *(float *)((char *)s + SP_ITV_MIN) = itv;
@@ -560,6 +603,18 @@ static void spawnTick(void) {
             spawnLogged = YES;
             TLog(@"[PVE] 刷怪加速生效：%d 只/秒 · 同屏 %d · 总数 %d（命中 %d 个刷怪器）",
                  cfg.spawnRate, cfg.spawnLimit, cfg.spawnTotal > 0 ? cfg.spawnTotal : 0, hit);
+        }
+        /* ★ 刷怪诊断（10 秒一条）：四段数字能一次定位卡在哪一环
+         *   在僵尸关=0  → hallInst() 拿不到（控制器类/方法没找到）⇒ 全部功能哑火
+         *   实例=0      → 刷怪器类没找到，或当前不在可刷怪的关卡
+         *   运行中=0    → _running 偏移不对，或波次还没开始
+         *   已改写=0 但运行中>0 → spec 匹配失败（实例是子类，klass 比对不上） */
+        static long lastSpawnDiag = 0;
+        long nowD = (long)(CFAbsoluteTimeGetCurrent() * 1000);
+        if (nowD - lastSpawnDiag > 10000) {
+            lastSpawnDiag = nowD;
+            TLog(@"[PVE] 🔎 刷怪诊断: 在僵尸关=%d 刷怪器实例=%d 运行中=%d 已改写=%d（spawn=%d rate=%d）",
+                 hallInst() ? 1 : 0, foundN, runningN, hit, cfg.spawn ? 1 : 0, cfg.spawnRate);
         }
     } @catch (NSException *e) {}
 }
@@ -703,6 +758,12 @@ static void setupStep(void) {
             retrySetup();
             return;
         }
+        /* ★ 绑定结果自检：哪一项是 0，就是那一环没找到（刷怪不生效先看这里） */
+        TLog(@"[PVE] 🔎 类绑定: Person=%d 射手=%d 僵尸控制器=%d Zombie=%d 僵尸本体=%d ｜刷怪器 僵尸=%d 圣诞=%d 通用=%d 500=%d",
+             K_person ? 1 : 0, K_shooter ? 1 : 0, K_halloween ? 1 : 0, K_zombie ? 1 : 0, K_hallPerson ? 1 : 0,
+             K_spawnerH ? 1 : 0, K_spawnerX ? 1 : 0, K_spawnerG ? 1 : 0, K_spawnerG5 ? 1 : 0);
+        TLog(@"[PVE] 🔎 方法绑定: 全量查找=%d Kill=%d 僵尸单例=%d 计分器=%d 伤害入口=%d",
+             mFOOAll ? 1 : 0, mKill1 ? 1 : 0, mHallInst ? 1 : 0, mHallScore ? 1 : 0, mHallTD ? 1 : 0);
         gTimer = [NSTimer timerWithTimeInterval:1.0 target:[ZBTimerTarget shared] selector:@selector(tick:) userInfo:nil repeats:YES];
         [[NSRunLoop mainRunLoop] addTimer:gTimer forMode:NSRunLoopCommonModes];
         TLog(@"[PVE] 🎯 SniperPVEZB v%s 就绪（杀怪=%d 每%dms×%d个 上限%d｜连击=%d｜刷怪=%d只/秒 同屏%d 总数%d｜时长=%ds｜无限子弹=%d）"
