@@ -32,6 +32,7 @@
 #include <string.h>
 #include <math.h>
 #include <stdlib.h>      /* malloc / calloc */
+#include <sys/stat.h>    /* 配置热重载：stat() 取文件修改时间 */
 
 #define TWEAK_VERSION "0.1.0"
 #define BUNDLE_SNIPER3D "com.fungames.sniper3d"
@@ -380,6 +381,12 @@ static int getZombiesKilled(void) {
 #define MAX_TARGETS 400
 static void *targets[MAX_TARGETS];
 static int targetsN = 0;
+/* Zombie 包装里的 person 往往**同时**也在 Person 列表里 → 不去重的话，
+ * 同一只僵尸会占掉好几个击杀名额（kill_per_tick=5 却只杀了 1 只）。 */
+static BOOL targetSeen(void *p) {
+    for (int i = 0; i < targetsN; i++) if (targets[i] == p) return YES;
+    return NO;
+}
 static void collectTargets(void) {
     targetsN = 0;
     @try {
@@ -410,7 +417,7 @@ static void collectTargets(void) {
                     void *z = *(void **)((char *)r + 0x20 + 8 * i);
                     if (!z) continue;
                     void *p = *(void **)((char *)z + 0x20);
-                    if (p) targets[targetsN++] = p;      /* 绕过存活过滤，包装在场即活怪 */
+                    if (p && !targetSeen(p)) targets[targetsN++] = p;   /* 绕过存活过滤 + 去重 */
                 }
             }
         }
@@ -420,22 +427,24 @@ static void killTick(void) {
     if (!cfg.autoKill) return;
     void *inst = hallInst();
     BOOL hallMode = (inst != NULL);
+    /* ★★ 必须锁死：只有在**僵尸噩梦关卡**才动杀手。
+     *   否则非僵尸关（普通关 / PVP）会走 Person.Kill(true) 分支 ——
+     *   那会把场上的人一个个杀掉（PVP 里就是真人玩家），属于灾难级副作用。 */
+    if (!hallMode) return;
     @try {
-        if (hallMode) {
-            int zk = getZombiesKilled();
-            if (zk >= 0) realKills = zk;
-            if (cfg.killCap > 0 && zk >= cfg.killCap) {
-                if (!capReached) {
-                    capReached = YES;
-                    TLog(@"[PVE] 击杀 %d/%d 已达上限，停止杀怪", zk, cfg.killCap);
-                }
-                return;
+        int zk = getZombiesKilled();
+        if (zk >= 0) realKills = zk;
+        if (cfg.killCap > 0 && zk >= cfg.killCap) {
+            if (!capReached) {
+                capReached = YES;
+                TLog(@"[PVE] 击杀 %d/%d 已达上限，停止杀怪", zk, cfg.killCap);
             }
-            capReached = NO;
+            return;
         }
+        capReached = NO;
         collectTargets();
         if (targetsN <= 3) return;          /* 大厅/菜单不许开杀 */
-        if (!gDmg) gDmg = malloc(8);
+        if (!gDmg) gDmg = (double *)malloc(8);   /* ⚠️ .xm 按 ObjC++ 编译，void* 不会隐式转 double* */
         *gDmg = 1e6;
         int n = 0;
         for (int i = 0; i < targetsN && n < cfg.killPerTick; i++) {
@@ -463,7 +472,7 @@ static void streakTick(void) {
         if (!sc) return;
         void *st = *(void **)((char *)sc + SC_STREAK);
         if (!st) return;
-        if (!gDmg) gDmg = malloc(8);
+        if (!gDmg) gDmg = (double *)malloc(8);   /* ⚠️ .xm 按 ObjC++ 编译，void* 不会隐式转 double* */
         /* 先读后写：已经钉在顶格就整段跳过（游戏自己也在动这些字段） */
         void *cfgO = *(void **)((char *)st + ST_CONFIG);
         if (cfgO) {
@@ -517,6 +526,7 @@ static BOOL specOf(void *cls, SpSpec *out) {
 }
 static void spawnTick(void) {
     if (!cfg.spawn || cfg.spawnRate <= 0) return;
+    if (!hallInst()) return;      /* ★ 同样只在僵尸关动手，别去改别的模式的刷怪器 */
     @try {
         float itv = 1.0f / (float)cfg.spawnRate;
         int total = cfg.spawnTotal > 0 ? cfg.spawnTotal : 500;
@@ -635,17 +645,20 @@ static long lastCfgMtime = 0;
 static void tick1s(NSTimer *t) {
     @try {
         (void)t;
-        @try {
-            NSDictionary *attr = [[NSFileManager defaultManager] attributesOfItemAtPath:ConfigPath() error:nil];
-            if (attr) {
-                long mt = (long)[attr[NSFileModificationDate] timeIntervalSince1970];
-                if (mt != lastCfgMtime) {
-                    if (lastCfgMtime != 0) TLog(@"[PVE] 配置已热重载");
-                    lastCfgMtime = mt;
-                    LoadConfig();
-                }
+        /* 配置热重载：每 5 秒 stat 一次（和 SniperPVP 同一套写法，不用 ObjC 字典，
+         * 免得 id 链式发消息在 ObjC++ 下出类型歧义） */
+        static long lastCfgChk = 0;
+        long now1s = (long)(CFAbsoluteTimeGetCurrent() * 1000);
+        if (now1s - lastCfgChk > 5000) {
+            lastCfgChk = now1s;
+            struct stat st;
+            NSString *p = ConfigPath();
+            if (stat([p UTF8String], &st) == 0) {
+                long mt = (long)st.st_mtime;
+                if (lastCfgMtime && mt != lastCfgMtime) { LoadConfig(); TLog(@"[PVE] 配置已热重载"); }
+                lastCfgMtime = mt;
             }
-        } @catch (NSException *e) {}
+        }
         if (!gReady) return;
         if (!shooterInst) shooterInst = findShooter();
         refillAmmo();
