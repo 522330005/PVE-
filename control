@@ -1,8 +1,8 @@
 Package: com.sniper.pvezb
-Name: SniperPVEZB
+Name: Sniper PVE 僵尸噩梦
 Version: 0.1.0
 Architecture: iphoneos-arm
-Description: Sniper3D PVE 僵尸噩梦 tweak (autohead.js native port: auto kill + streak + spawn boost + time limit)
+Description: 自动杀怪 / 连击注入 / 刷怪加速 / 时长压缩 / 无限子弹（参数: Documents/pvezb_config.json）
 Maintainer: sniper
 Author: sniper
 Section: Tweaks
