@@ -381,6 +381,7 @@ static int  totalKilled = 0;
 static long lastKillAt = 0, lastSpawnAt = 0, lastStreakAt = 0, lastTimeAt = 0, lastBeatAt = 0;
 static long frames = 0;
 static BOOL inHallLogged = NO;    /* "进入僵尸关卡"只报一次 */
+static long hallNullSince = 0;    /* 在僵尸关=0 持续计时（用于提示是否真在关卡内） */
 static BOOL spawnLogged = NO;     /* "刷怪加速生效"只报一次（别和上面共用同一个标志） */
 static BOOL capReached = NO;
 
@@ -567,7 +568,15 @@ static BOOL specOf(void *cls, SpSpec *out) {
 }
 static void spawnTick(void) {
     if (!cfg.spawn || cfg.spawnRate <= 0) return;
-    if (!hallInst()) return;      /* ★ 同样只在僵尸关动手，别去改别的模式的刷怪器 */
+    void *hi = hallInst();
+    if (!hi) {     /* 不在僵尸关：仍输出诊断，否则整段静默、看不出卡哪一环 */
+        static long lastSD0 = 0; long nd = (long)(CFAbsoluteTimeGetCurrent() * 1000);
+        if (nd - lastSD0 > 10000) { lastSD0 = nd;
+            TLog(@"[PVE] 🔎 刷怪诊断: 在僵尸关=0（get_HalloweenInstance 返回空）刷怪器实例=0 运行中=0 已改写=0（spawn=%d rate=%d）",
+                 cfg.spawn ? 1 : 0, cfg.spawnRate);
+        }
+        return;      /* ★ 只在僵尸关动手，别去改别的模式的刷怪器 */
+    }
     @try {
         float itv = 1.0f / (float)cfg.spawnRate;
         int total = cfg.spawnTotal > 0 ? cfg.spawnTotal : 500;
@@ -663,14 +672,27 @@ static void frame(void) {
         frames++;
         long now = (long)(CFAbsoluteTimeGetCurrent() * 1000);
         if (!gReady) return;
+        /* ★ master 总开关：运行中热改成 false 也要立刻全部停手（原来只在启动那一次检查，
+         *   热重载改 false 后功能照样在跑 —— 和全球行动那份同一个坑，一起修）。 */
+        if (!cfg.master) return;
 
         if (!shooterInst || now - shooterFindAt > 5000) { shooterInst = findShooter(); shooterFindAt = now; }
         refillAmmo();
 
         void *inst = hallInst();
-        if (inst && !inHallLogged) {
-            inHallLogged = YES;
-            TLog(@"[PVE] 进入僵尸噩梦关卡 → 常驻功能全部生效");
+        if (inst) {
+            if (!inHallLogged) {
+                inHallLogged = YES;
+                TLog(@"[PVE] 进入僵尸噩梦关卡 → 常驻功能全部生效");
+            }
+            hallNullSince = 0;
+        } else {
+            if (inHallLogged) { inHallLogged = NO; TLog(@"[PVE] 离开僵尸噩梦关卡"); }
+            if (hallNullSince == 0) hallNullSince = now;
+            else if (now - hallNullSince > 30000) {
+                hallNullSince = now;
+                TLog(@"[PVE] 🔎 在僵尸关=0 已持续≥30s（帧=%ld）：若你此刻确实在【僵尸噩梦/Halloween Live Event】关卡内，说明 get_HalloweenInstance 返回空（事件未激活 或 不是该模式）；若只是在菜单/其它模式则属正常", frames);
+            }
         }
         if (now - lastKillAt >= cfg.tickMs)   { lastKillAt = now; killTick(); }
         if (now - lastStreakAt >= 250)        { lastStreakAt = now; streakTick(); }
@@ -715,6 +737,7 @@ static void tick1s(NSTimer *t) {
             }
         }
         if (!gReady) return;
+        if (!cfg.master) return;      /* ★ 同上：master 关了就别刷怪/别压时长 */
         if (!shooterInst) shooterInst = findShooter();
         refillAmmo();
         spawnTick();
