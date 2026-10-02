@@ -21,6 +21,42 @@ jobs:
         with:
           submodules: recursive   # ⚠️ theos 的 dm.pl 是 vendor 子模块，不 recursive 会 "requires dm.pl"
 
+      # ★ 2026-10-02 加：身份自检。期望值写死在本仓库的 workflow 里，
+      #   手动往 GitHub 传文件时若把两个仓库的 control / Makefile 传反，
+      #   这里会立刻红字失败（而不是默默编出一个对调的 deb）。
+      - name: Verify identity (防 Makefile/control 传错仓库)
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          set -e
+          # ★ 先按【仓库名】推断本仓库应有的身份 —— 整套文件传错仓库时也能报准；
+          #   仓库名认不出来就用本 workflow 写死的期望值兜底。
+          EXPECT_TWEAK=SniperPVEZB
+          EXPECT_PKG=com.sniper.pvezb
+          case "$REPO" in
+            *ombie*|*ZB*|*zb*)     EXPECT_TWEAK=SniperPVEZB; EXPECT_PKG=com.sniper.pvezb ;;
+            *lobal*|*Ops*|*PVEGA*) EXPECT_TWEAK=SniperPVEGA; EXPECT_PKG=com.sniper.pvega ;;
+            *PVP*|*pvp*)           EXPECT_TWEAK=SniperPVP;   EXPECT_PKG=com.sniper.pvp ;;
+          esac
+          echo "仓库 = $REPO"
+          echo "本仓库应有身份: TWEAK_NAME=$EXPECT_TWEAK   Package=$EXPECT_PKG"
+          TWEAK=$(grep -m1 '^TWEAK_NAME' Makefile | awk '{print $3}')
+          PKG=$(grep -m1 '^Package:' control | awk '{print $2}')
+          echo "期望  TWEAK_NAME=$EXPECT_TWEAK   Package=$EXPECT_PKG"
+          echo "实际  TWEAK_NAME=$TWEAK   Package=$PKG"
+          if [ "$TWEAK" != "$EXPECT_TWEAK" ]; then
+            echo "❌ Makefile 不对：本仓库应是 $EXPECT_TWEAK，实际是 $TWEAK"
+            exit 1
+          fi
+          if [ "$PKG" != "$EXPECT_PKG" ]; then
+            echo "❌ control 不对：应是 $EXPECT_PKG，实际是 $PKG"
+            echo "   ← 极可能是把两个仓库的 control 传反了！"
+            exit 1
+          fi
+          if [ ! -f "$TWEAK.plist" ]; then echo "❌ 缺少 $TWEAK.plist"; exit 1; fi
+          if [ ! -f Tweak.xm ]; then echo "❌ 缺少 Tweak.xm"; exit 1; fi
+          echo "✅ 身份自洽：Makefile / control / plist 三者匹配"
+
       - name: Install deps
         run: |
           sudo apt-get update
@@ -60,6 +96,28 @@ jobs:
           echo "THEOS=$THEOS"
           export THEOS_PACKAGE_SCHEME=rootless
           make package
+
+      # ★ 2026-10-02 加：产物自检。校验 deb 的 Package 与内部 dylib 名是否匹配，
+      #   这是最后一道关 —— 就算前面全对，这里也能抓出"包里装的不是自己那套代码"。
+      - name: Verify deb (防产物 dylib 与 Package 对调)
+        run: |
+          set -e
+          EXPECT_PKG=com.sniper.pvezb
+          EXPECT_DYLIB=SniperPVEZB.dylib
+          DEB=$(ls packages/*.deb | head -1)
+          PKG=$(dpkg-deb -f "$DEB" Package)
+          DYLIB=$(dpkg-deb -c "$DEB" | grep -o '[^/]*\.dylib' | head -1)
+          echo "产物 $DEB"
+          echo "  Package=$PKG    dylib=$DYLIB"
+          if [ "$PKG" != "$EXPECT_PKG" ]; then
+            echo "❌ deb 的 Package 应为 $EXPECT_PKG，实际 $PKG"
+            exit 1
+          fi
+          if [ "$DYLIB" != "$EXPECT_DYLIB" ]; then
+            echo "❌ deb 内的 dylib 应为 $EXPECT_DYLIB，实际 $DYLIB"
+            exit 1
+          fi
+          echo "✅ 产物自洽：Package=$PKG 与 dylib=$DYLIB 匹配"
 
       - name: Upload deb artifact
         uses: actions/upload-artifact@v4
