@@ -34,7 +34,7 @@
 #include <stdlib.h>      /* malloc / calloc */
 #include <sys/stat.h>    /* 配置热重载：stat() 取文件修改时间 */
 
-#define TWEAK_VERSION "0.1.0"
+#define TWEAK_VERSION "0.2.0"  /* 2026-10-03：★模式门禁——三份 deb 并存，只在【僵尸噩梦】关卡启用（无限子弹/杀怪/连击/刷怪/压时长）；离开该模式全部待机 */
 #define BUNDLE_SNIPER3D "com.fungames.sniper3d"
 
 /* ★ 默认参数（会被配置覆盖）—— 必须定义在文件头，ConfigDefaults() 要用 */
@@ -676,9 +676,6 @@ static void frame(void) {
          *   热重载改 false 后功能照样在跑 —— 和全球行动那份同一个坑，一起修）。 */
         if (!cfg.master) return;
 
-        if (!shooterInst || now - shooterFindAt > 5000) { shooterInst = findShooter(); shooterFindAt = now; }
-        refillAmmo();
-
         void *inst = hallInst();
         if (inst) {
             if (!inHallLogged) {
@@ -693,7 +690,17 @@ static void frame(void) {
                 hallNullSince = now;
                 TLog(@"[PVE] 🔎 在僵尸关=0 已持续≥30s（帧=%ld）：若你此刻确实在【僵尸噩梦/Halloween Live Event】关卡内，说明 get_HalloweenInstance 返回空（事件未激活 或 不是该模式）；若只是在菜单/其它模式则属正常", frames);
             }
+            /* ★★★ 模式门禁（2026-10-03 用户要求：三份 deb 并存，只在各自模式开功能）：
+             *   不在僵尸噩梦关卡 → 无限子弹/杀怪/连击/刷怪/压时长 一概不启用
+             *   （以前无限子弹在菜单/PVP/全球行动都在补弹）。 */
+            shooterInst = NULL; shooterFindAt = 0;
+            if (inHallLogged) { inHallLogged = NO; TLog(@"[PVE] 离开僵尸噩梦关卡 → 功能待机（全部停手）"); }
+            return;
         }
+        /* ★ 只在僵尸关内才维护射手句柄 + 补弹 */
+        if (!shooterInst || now - shooterFindAt > 5000) { shooterInst = findShooter(); shooterFindAt = now; }
+        refillAmmo();
+
         if (now - lastKillAt >= cfg.tickMs)   { lastKillAt = now; killTick(); }
         if (now - lastStreakAt >= 250)        { lastStreakAt = now; streakTick(); }
         if (now - lastSpawnAt >= 500)         { lastSpawnAt = now; spawnTick(); }
@@ -738,6 +745,8 @@ static void tick1s(NSTimer *t) {
         }
         if (!gReady) return;
         if (!cfg.master) return;      /* ★ 同上：master 关了就别刷怪/别压时长 */
+        /* ★ 模式门禁：不在僵尸噩梦关卡 → 只保留配置热重载，不补弹/不刷怪/不压时长 */
+        if (!hallInst()) { shooterInst = NULL; return; }
         if (!shooterInst) shooterInst = findShooter();
         refillAmmo();
         spawnTick();
